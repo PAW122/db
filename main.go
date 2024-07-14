@@ -18,9 +18,14 @@ func main() {
 
 		// Przykładowa konfiguracja
 		config := types.Config{
-			Port:    5432,
-			Api_key: "database_acces_api_key",
-			Version: "1.0.0",
+			Port:                5432,
+			Api_key:             "database_acces_api_key",
+			Version:             "1.0.0",
+			Cache_incoming_all:  true,
+			Cache_incoming_time: 60,
+			Cache_outgoing_all:  true,
+			Cache_outgoing_time: 60,
+			UseBSON:             true,
 		}
 
 		// Konwertowanie struktury do JSON
@@ -39,7 +44,7 @@ func main() {
 
 		fmt.Println("Config file sucesfully created...")
 
-		server.Start_server(config)
+		server.StartServer(config)
 
 	} else {
 		// Plik istnieje
@@ -60,6 +65,6 @@ func main() {
 			return
 		}
 
-		server.Start_server(config)
+		server.StartServer(config)
 	}
 }
