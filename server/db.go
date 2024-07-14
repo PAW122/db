@@ -170,7 +170,6 @@ func (db *Database) batchSave(tasks map[string]interface{}) error {
 			db.data[key] = cd
 		}
 		cd.Value = value
-		cacheIncoming(key, value)
 	}
 
 	if _, err := os.Stat("db"); os.IsNotExist(err) {
@@ -286,6 +285,7 @@ func StartServer(cfg types.Config) {
 		}
 
 		path := r.URL.Query().Get("path")
+		go cacheIncoming(path, data)
 		err = db.Set(path, data)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to save data: %v", err), http.StatusInternalServerError)
@@ -302,6 +302,13 @@ func StartServer(cfg types.Config) {
 		}
 
 		path := r.URL.Query().Get("path")
+
+		cache_data, cache_found := getCache(path)
+		if cache_found {
+			sendJSONResponse(w, cache_data)
+			return
+		}
+
 		if path == "" {
 			db.mu.Lock()
 			data := db.data
@@ -354,6 +361,7 @@ func StartServer(cfg types.Config) {
 		}
 
 		path := r.URL.Query().Get("path")
+		go cacheIncoming(path, data)
 		err = db.Add(path, data)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to add data: %v", err), http.StatusInternalServerError)
