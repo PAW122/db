@@ -99,6 +99,7 @@ async function readData(key) {
     + V 1.1
     save: +/- 00:03:69
     read: +/- 00:03:32
+    delete: +/- 00:03:14
 
 
 Test code:
