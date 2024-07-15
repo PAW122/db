@@ -50,11 +50,14 @@ func cacheOutgoing(key string, data interface{}) bool {
 }
 
 type Database struct {
-	data      map[string]*cacheData
-	file      string
-	useBSON   bool
-	saveQueue chan saveTask
-	mu        sync.Mutex
+	data        map[string]*cacheData
+	file        string
+	useBSON     bool
+	saveQueue   chan saveTask
+	deleteQueue chan deleteTask
+	mu          sync.Mutex
+	saveMu      sync.Mutex
+	deleteMu    sync.Mutex
 }
 
 type cacheData struct {
@@ -66,18 +69,24 @@ type saveTask struct {
 	value interface{}
 }
 
+type deleteTask struct {
+	key string
+}
+
 func NewDatabase(filename string, useBSON bool) (*Database, error) {
 	db := &Database{
-		data:      make(map[string]*cacheData),
-		file:      filepath.Join("db", filename),
-		useBSON:   useBSON,
-		saveQueue: make(chan saveTask, 10000),
+		data:        make(map[string]*cacheData),
+		file:        filepath.Join("db", filename),
+		useBSON:     useBSON,
+		saveQueue:   make(chan saveTask, 10000),
+		deleteQueue: make(chan deleteTask, 10000),
 	}
 	err := db.load()
 	if err != nil {
 		return nil, err
 	}
 	go db.processSaveQueue()
+	go db.processDeleteQueue()
 	return db, nil
 }
 
@@ -104,8 +113,10 @@ func (db *Database) load() error {
 }
 
 func (db *Database) save() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.saveMu.Lock()
+	defer func() {
+		db.saveMu.Unlock()
+	}()
 
 	if _, err := os.Stat("db"); os.IsNotExist(err) {
 		err := os.Mkdir("db", 0755)
@@ -159,6 +170,32 @@ func (db *Database) processSaveQueue() {
 	}
 }
 
+func (db *Database) processDeleteQueue() {
+	tasks := make(map[string]struct{})
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case task := <-db.deleteQueue:
+			tasks[task.key] = struct{}{}
+			if len(tasks) >= 100 {
+				if err := db.batchDelete(tasks); err != nil {
+					log.Printf("Error deleting batch: %v", err)
+				}
+				tasks = make(map[string]struct{})
+			}
+		case <-ticker.C:
+			if len(tasks) > 0 {
+				if err := db.batchDelete(tasks); err != nil {
+					log.Printf("Error deleting batch: %v", err)
+				}
+				tasks = make(map[string]struct{})
+			}
+		}
+	}
+}
+
 func (db *Database) batchSave(tasks map[string]interface{}) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -201,6 +238,23 @@ func (db *Database) batchSave(tasks map[string]interface{}) error {
 	return nil
 }
 
+func (db *Database) batchDelete(tasks map[string]struct{}) error {
+	db.deleteMu.Lock()
+	defer db.deleteMu.Unlock()
+
+	for key := range tasks {
+		delete(db.data, key)
+	}
+
+	err := db.save()
+	return err
+}
+
+func (db *Database) Delete(key string) error {
+	db.deleteQueue <- deleteTask{key: key}
+	return nil
+}
+
 func (db *Database) enqueueSaveTask(key string, value interface{}) {
 	db.saveQueue <- saveTask{key: key, value: value}
 	// log.Printf("Enqueued save task: %s", key)
@@ -231,14 +285,6 @@ func (db *Database) Get(key string) (interface{}, bool) {
 
 	go cacheOutgoing(key, cd.Value)
 	return cd.Value, true
-}
-
-func (db *Database) Delete(key string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	delete(db.data, key)
-	return db.save()
 }
 
 func (db *Database) Add(key string, value interface{}) error {

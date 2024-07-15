@@ -84,7 +84,7 @@ async function readData(key) {
 - bson :
 
     + V 1.0
-    save: +/- 1:56:00
+    save: +/- 1:56:00   (mm:ss:ms)
     read: +/- 00:06:00
 
     + V 1.1

@@ -20,7 +20,7 @@ func main() {
 		config := types.Config{
 			Port:                5432,
 			Api_key:             "database_acces_api_key",
-			Version:             "1.1.1",
+			Version:             "1.1.2",
 			Cache_incoming_all:  true,
 			Cache_incoming_time: 60,
 			Cache_outgoing_all:  true,
