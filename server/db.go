@@ -55,9 +55,11 @@ type Database struct {
 	useBSON     bool
 	saveQueue   chan saveTask
 	deleteQueue chan deleteTask
+	readQueue   chan readTask
 	mu          sync.Mutex
 	saveMu      sync.Mutex
 	deleteMu    sync.Mutex
+	tasksMu     sync.Mutex
 }
 
 type cacheData struct {
@@ -73,6 +75,16 @@ type deleteTask struct {
 	key string
 }
 
+type readTask struct {
+	key      string
+	response chan readResponse
+}
+
+type readResponse struct {
+	value interface{}
+	found bool
+}
+
 func NewDatabase(filename string, useBSON bool) (*Database, error) {
 	db := &Database{
 		data:        make(map[string]*cacheData),
@@ -80,6 +92,7 @@ func NewDatabase(filename string, useBSON bool) (*Database, error) {
 		useBSON:     useBSON,
 		saveQueue:   make(chan saveTask, 10000),
 		deleteQueue: make(chan deleteTask, 10000),
+		readQueue:   make(chan readTask, 10000),
 	}
 	err := db.load()
 	if err != nil {
@@ -87,6 +100,7 @@ func NewDatabase(filename string, useBSON bool) (*Database, error) {
 	}
 	go db.processSaveQueue()
 	go db.processDeleteQueue()
+	go db.processReadQueue()
 	return db, nil
 }
 
@@ -152,6 +166,7 @@ func (db *Database) processSaveQueue() {
 	for {
 		select {
 		case task := <-db.saveQueue:
+			db.tasksMu.Lock()
 			tasks[task.key] = task.value
 			if len(tasks) >= 100 {
 				if err := db.batchSave(tasks); err != nil {
@@ -159,13 +174,37 @@ func (db *Database) processSaveQueue() {
 				}
 				tasks = make(map[string]interface{})
 			}
+			db.tasksMu.Unlock()
 		case <-ticker.C:
+			db.tasksMu.Lock()
 			if len(tasks) > 0 {
 				if err := db.batchSave(tasks); err != nil {
 					log.Printf("Error saving batch: %v", err)
 				}
 				tasks = make(map[string]interface{})
 			}
+			db.tasksMu.Unlock()
+		}
+	}
+}
+
+func (db *Database) processReadQueue() {
+	for task := range db.readQueue {
+		cachedData, cacheFound := getCache(task.key)
+		if cacheFound {
+			task.response <- readResponse{value: cachedData, found: true}
+			continue
+		}
+
+		db.mu.Lock()
+		cd, ok := db.data[task.key]
+		db.mu.Unlock()
+
+		if !ok {
+			task.response <- readResponse{value: nil, found: false}
+		} else {
+			go cacheOutgoing(task.key, cd.Value)
+			task.response <- readResponse{value: cd.Value, found: true}
 		}
 	}
 }
@@ -178,6 +217,7 @@ func (db *Database) processDeleteQueue() {
 	for {
 		select {
 		case task := <-db.deleteQueue:
+			db.tasksMu.Lock() // Zablokowanie dostępu do mapy tasks
 			tasks[task.key] = struct{}{}
 			if len(tasks) >= 100 {
 				if err := db.batchDelete(tasks); err != nil {
@@ -185,13 +225,16 @@ func (db *Database) processDeleteQueue() {
 				}
 				tasks = make(map[string]struct{})
 			}
+			db.tasksMu.Unlock() // Odblokowanie dostępu do mapy tasks
 		case <-ticker.C:
+			db.tasksMu.Lock() // Zablokowanie dostępu do mapy tasks
 			if len(tasks) > 0 {
 				if err := db.batchDelete(tasks); err != nil {
 					log.Printf("Error deleting batch: %v", err)
 				}
 				tasks = make(map[string]struct{})
 			}
+			db.tasksMu.Unlock() // Odblokowanie dostępu do mapy tasks
 		}
 	}
 }
@@ -260,6 +303,10 @@ func (db *Database) enqueueSaveTask(key string, value interface{}) {
 	// log.Printf("Enqueued save task: %s", key)
 }
 
+func (db *Database) enqueueReadTask(key string, response chan readResponse) {
+	db.readQueue <- readTask{key: key, response: response}
+}
+
 func (db *Database) Set(key string, value interface{}) error {
 	if key == "" {
 		return fmt.Errorf("key cannot be empty")
@@ -270,21 +317,10 @@ func (db *Database) Set(key string, value interface{}) error {
 }
 
 func (db *Database) Get(key string) (interface{}, bool) {
-	cachedData, cacheFound := getCache(key)
-	if cacheFound {
-		return cachedData, true
-	}
-
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	cd, ok := db.data[key]
-	if !ok {
-		return nil, false
-	}
-
-	go cacheOutgoing(key, cd.Value)
-	return cd.Value, true
+	response := make(chan readResponse)
+	db.enqueueReadTask(key, response)
+	result := <-response
+	return result.value, result.found
 }
 
 func (db *Database) Add(key string, value interface{}) error {
@@ -292,7 +328,50 @@ func (db *Database) Add(key string, value interface{}) error {
 		return fmt.Errorf("key cannot be empty")
 	}
 
-	db.enqueueSaveTask(key, value)
+	var existingValue interface{}
+	var found bool
+
+	// Odczytaj istniejące dane dla danego klucza
+	cache_data, cache_found := getCache(key)
+	if !cache_found {
+		var data interface{}
+		data, found = db.Get(key)
+		existingValue = data
+	} else {
+		existingValue = cache_data
+		found = true
+	}
+
+	var newValue map[string]interface{}
+
+	if found {
+		// Jeśli dane istnieją, dodaj nowe wartości do istniejących
+		existingMap, ok := existingValue.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("existing data is not a valid map")
+		}
+
+		newMap, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("new data is not a valid map")
+		}
+
+		for k, v := range newMap {
+			existingMap[k] = v
+		}
+
+		newValue = existingMap
+	} else {
+		// Jeśli dane nie istnieją, spróbuj przekonwertować na mapę
+		newMap, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("new data is not a valid map")
+		}
+		newValue = newMap
+	}
+
+	// Zapisz zaktualizowane dane
+	db.enqueueSaveTask(key, newValue)
 	return nil
 }
 
@@ -402,11 +481,17 @@ func StartServer(cfg types.Config) {
 		var data interface{}
 		err := json.NewDecoder(r.Body).Decode(&data)
 		if err != nil {
+			log.Printf("Invalid JSON format: %v", err)
 			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 			return
 		}
 
 		path := r.URL.Query().Get("path")
+		if path == "" {
+			http.Error(w, "Path parameter is required", http.StatusBadRequest)
+			return
+		}
+
 		go cacheIncoming(path, data)
 		err = db.Add(path, data)
 		if err != nil {

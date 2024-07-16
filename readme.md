@@ -91,6 +91,13 @@ async function readData(key) {
     save: +/- 00:03:73
     read: +/- 00:03:38
 
+    + V1.2.2
+    save: +/- 00:03:73
+    read: +/- 00:03:38
+    add: +/- 00:03:90
+    delete: +/- 00:03:28
+    >the /add function may be inefficient for larger numbers of commands, for version 1.2.2 I recommend using /read and /save instead of /add
+
 - json :
     + V 1.0
     save: N/A
@@ -98,6 +105,7 @@ async function readData(key) {
 
     + V 1.1
     save: +/- 00:03:69
+    add: +/- 00:03:90
     read: +/- 00:03:32
     delete: +/- 00:03:14
 
@@ -170,7 +178,7 @@ async function deleteData(key) {
 // Function to test database operations
 async function testDatabaseOperations() {
     const numEntries = 10000;
-    const sampleData = Array.from({ length: numEntries }, (_, index) => generateSampleData(index));
+    let sampleData = Array.from({ length: numEntries }, (_, index) => generateSampleData(index));
 
     // Save operation
     console.time('Save Time');
@@ -179,25 +187,27 @@ async function testDatabaseOperations() {
     }
     console.timeEnd('Save Time');
 
+    console.time("add data")    
+    for (let i = 0; i < numEntries; i++) {
+        await addData(sampleData[i].key, {added: i});
+    }
+    console.timeEnd('add data');
+
     // Read operation
     console.time('Read Time');
     for (let i = 0; i < numEntries; i++) {
-        const key = `${i}`; // adjust key if necessary based on your server implementation
+        const key = `${i}`;
         const data = await readData(key);
-        // console.log(data)
-        // Optionally, verify data here
     }
     console.timeEnd('Read Time');
 
-    // Delete operation (assuming you're deleting 'some_float' field)
-    // console.time('Delete Time');
-    // for (let i = 0; i < numEntries; i++) {
-    //     await deleteData('some_float');
-    // }
-    // console.timeEnd('Delete Time');
+    console.time('Delete Time');
+    for (let i = 0; i < numEntries; i++) {
+        await deleteData(`${sampleData[i].key}`);
+    }
+    console.timeEnd('Delete Time');
 }
 
-// Run the test
 testDatabaseOperations();
 
 ```
