@@ -15,9 +15,9 @@ const dataToSave = {
     some_float: 1.5
 };
 
-async function saveData() {
+async function saveData(key = "user_1") {
     try {
-        const response = await axios.post(`${serverUrl}/save?path=`, dataToSave,
+        const response = await axios.post(`${serverUrl}/save?path=${key}`, dataToSave,
             {
                 headers: {
                     'X-API-Key': api_key
@@ -29,9 +29,9 @@ async function saveData() {
     }
 }
 
-async function add() {
+async function add(key = "user_1") {
     try {
-        const response = await axios.post(`${serverUrl}/add?path=user`, { name: "test" },
+        const response = await axios.post(`${serverUrl}/add?path=${key}`, { name: "test" },
             {
                 headers: {
                     'X-API-Key': api_key
@@ -44,9 +44,9 @@ async function add() {
     }
 }
 
-async function delete() {
+async function delete(key = "user_1.some_float") {
     try {
-        const response = await axios.get(`${serverUrl}/delete?path=some_float`,
+        const response = await axios.get(`${serverUrl}/delete?path=${key}`,
             {
                 headers: {
                     'X-API-Key': api_key
