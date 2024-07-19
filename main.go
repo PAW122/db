@@ -20,12 +20,27 @@ func main() {
 		config := types.Config{
 			Port:                5432,
 			Api_key:             "database_acces_api_key",
-			Version:             "1.2.2",
+			Version:             "1.2.4",
+			File_name:           "db",
 			Cache_incoming_all:  true,
-			Cache_incoming_time: 60,
+			Cache_incoming_time: 120,
 			Cache_outgoing_all:  true,
-			Cache_outgoing_time: 60,
-			UseBSON:             true,
+			Cache_outgoing_time: 120,
+			UseBSON:             false,
+			Queue_save_size:     100000,
+			Queue_delete_size:   100000,
+			Queue_read_size:     100000,
+			Queue_add_size:      100000,
+			AsfsConfig: types.ASFS_config{
+				Enable:        true,
+				Max_cpu_usage: 70,
+			},
+			AsqsConfig: types.ASQS_config{ //
+				Enable:                  true,
+				Interval:                5,
+				Queue_threshold:         1000,
+				Worker_count_multiplier: 1,
+			},
 		}
 
 		// Konwertowanie struktury do JSON

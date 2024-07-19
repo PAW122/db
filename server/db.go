@@ -6,9 +6,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"pawiu-db/types"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -50,16 +53,32 @@ func cacheOutgoing(key string, data interface{}) bool {
 }
 
 type Database struct {
-	data        map[string]*cacheData
-	file        string
-	useBSON     bool
-	saveQueue   chan saveTask
-	deleteQueue chan deleteTask
-	readQueue   chan readTask
-	mu          sync.Mutex
-	saveMu      sync.Mutex
-	deleteMu    sync.Mutex
-	tasksMu     sync.Mutex
+	data           map[string]*cacheData
+	file           string
+	useBSON        bool
+	saveQueue      chan saveTask
+	deleteQueue    chan deleteTask
+	readQueue      chan readTask
+	addQueue       chan addTask
+	mu             sync.Mutex
+	saveMu         sync.Mutex
+	deleteMu       sync.Mutex
+	tasksMu        sync.Mutex
+	wg             sync.WaitGroup
+	addBufferSize  int
+	addBatchSize   int
+	addBuffer      []addTask
+	addBufferMutex sync.Mutex
+	addBufferCond  *sync.Cond
+	saveWorkers    int32
+	deleteWorkers  int32
+	readWorkers    int32
+	addWorkers     int32
+}
+
+type addTask struct {
+	key   string
+	value interface{}
 }
 
 type cacheData struct {
@@ -87,20 +106,39 @@ type readResponse struct {
 
 func NewDatabase(filename string, useBSON bool) (*Database, error) {
 	db := &Database{
-		data:        make(map[string]*cacheData),
-		file:        filepath.Join("db", filename),
-		useBSON:     useBSON,
-		saveQueue:   make(chan saveTask, 10000),
-		deleteQueue: make(chan deleteTask, 10000),
-		readQueue:   make(chan readTask, 10000),
+		data:          make(map[string]*cacheData),
+		file:          filepath.Join(config.File_name, filename),
+		useBSON:       useBSON,
+		saveQueue:     make(chan saveTask, config.Queue_save_size),
+		deleteQueue:   make(chan deleteTask, config.Queue_delete_size),
+		readQueue:     make(chan readTask, config.Queue_read_size),
+		addQueue:      make(chan addTask, config.Queue_add_size),
+		addBufferSize: 1000,
+		addBatchSize:  100,
+		addBuffer:     make([]addTask, 0, 1000),
 	}
+	db.addBufferCond = sync.NewCond(&db.addBufferMutex)
 	err := db.load()
 	if err != nil {
 		return nil, err
 	}
-	go db.processSaveQueue()
-	go db.processDeleteQueue()
-	go db.processReadQueue()
+
+	numCPU := runtime.NumCPU() * config.AsqsConfig.Worker_count_multiplier
+
+	for i := 0; i < numCPU; i++ {
+		db.wg.Add(1)
+		go db.processSaveQueue()
+		db.wg.Add(1)
+		go db.processDeleteQueue()
+		db.wg.Add(1)
+		go db.processReadQueue()
+		db.wg.Add(1)
+		go db.processAddQueue()
+	}
+
+	go db.autoScaleWorkers()
+
+	go AutoScalingFileSystem(config)
 	return db, nil
 }
 
@@ -300,7 +338,6 @@ func (db *Database) Delete(key string) error {
 
 func (db *Database) enqueueSaveTask(key string, value interface{}) {
 	db.saveQueue <- saveTask{key: key, value: value}
-	// log.Printf("Enqueued save task: %s", key)
 }
 
 func (db *Database) enqueueReadTask(key string, response chan readResponse) {
@@ -328,51 +365,140 @@ func (db *Database) Add(key string, value interface{}) error {
 		return fmt.Errorf("key cannot be empty")
 	}
 
-	var existingValue interface{}
-	var found bool
-
-	// Odczytaj istniejące dane dla danego klucza
-	cache_data, cache_found := getCache(key)
-	if !cache_found {
-		var data interface{}
-		data, found = db.Get(key)
-		existingValue = data
-	} else {
-		existingValue = cache_data
-		found = true
-	}
-
-	var newValue map[string]interface{}
-
-	if found {
-		// Jeśli dane istnieją, dodaj nowe wartości do istniejących
-		existingMap, ok := existingValue.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("existing data is not a valid map")
-		}
-
-		newMap, ok := value.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("new data is not a valid map")
-		}
-
-		for k, v := range newMap {
-			existingMap[k] = v
-		}
-
-		newValue = existingMap
-	} else {
-		// Jeśli dane nie istnieją, spróbuj przekonwertować na mapę
-		newMap, ok := value.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("new data is not a valid map")
-		}
-		newValue = newMap
-	}
-
-	// Zapisz zaktualizowane dane
-	db.enqueueSaveTask(key, newValue)
+	db.addQueue <- addTask{key: key, value: value}
 	return nil
+}
+
+func (db *Database) processAddBuffer() {
+	db.addBufferMutex.Lock()
+	defer db.addBufferMutex.Unlock()
+
+	batchSize := db.addBatchSize
+	if len(db.addBuffer) < batchSize {
+		batchSize = len(db.addBuffer)
+	}
+
+	tasks := db.addBuffer[:batchSize]
+	db.addBuffer = db.addBuffer[batchSize:]
+
+	for _, task := range tasks {
+		cache_data, cache_found := getCache(task.key)
+		var existingValue map[string]interface{}
+		if cache_found {
+			existingValue, _ = cache_data.(map[string]interface{})
+		} else {
+			data, found := db.Get(task.key)
+			if found {
+				existingValue, _ = data.(map[string]interface{})
+			}
+		}
+
+		if existingValue == nil {
+			existingValue = make(map[string]interface{})
+		}
+
+		newValue, ok := task.value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		for k, v := range newValue {
+			existingValue[k] = v
+		}
+
+		db.enqueueSaveTask(task.key, existingValue)
+	}
+}
+
+func (db *Database) processAddQueue() {
+	ticker := time.NewTicker(time.Duration(config.AsqsConfig.Interval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case task := <-db.addQueue:
+			db.addBufferMutex.Lock()
+			db.addBuffer = append(db.addBuffer, task)
+			if len(db.addBuffer) >= db.addBufferSize {
+				db.addBufferCond.Signal()
+			}
+			db.addBufferMutex.Unlock()
+
+		case <-ticker.C:
+			db.addBufferMutex.Lock()
+			if len(db.addBuffer) > 0 {
+				db.processAddBuffer()
+			}
+			db.addBufferMutex.Unlock()
+		}
+	}
+}
+
+func GetQueueLength(db *Database) int {
+	return len(db.saveQueue)
+}
+
+func GetQueueLengthDelete(db *Database) int {
+	return len(db.deleteQueue)
+}
+
+func GetQueueLengthRead(db *Database) int {
+	return len(db.readQueue)
+}
+
+func (db *Database) autoScaleWorkers() {
+	ticker := time.NewTicker(time.Duration(config.AsqsConfig.Interval) * time.Second)
+	defer ticker.Stop()
+
+	firstRun := true
+
+	for range ticker.C {
+		saveQueueLen := len(db.saveQueue)
+		deleteQueueLen := len(db.deleteQueue)
+		readQueueLen := len(db.readQueue)
+		addQueueLen := len(db.addQueue)
+
+		if saveQueueLen > config.AsqsConfig.Queue_threshold {
+			go db.processSaveQueue()
+			atomic.AddInt32(&db.saveWorkers, 1)
+		}
+		if deleteQueueLen > config.AsqsConfig.Queue_threshold {
+			go db.processDeleteQueue()
+			atomic.AddInt32(&db.deleteWorkers, 1)
+		}
+		if readQueueLen > config.AsqsConfig.Queue_threshold {
+			go db.processReadQueue()
+			atomic.AddInt32(&db.readWorkers, 1)
+		}
+		if addQueueLen > config.AsqsConfig.Queue_threshold {
+			go db.processAddQueue()
+			atomic.AddInt32(&db.addWorkers, 1)
+		}
+
+		// Print statistics to the terminal
+		if firstRun {
+			clearTerminal()
+			firstRun = false
+		} else {
+			moveCursorUp(4) // Zwiększ o 4 linie dla dodania nowej sekcji
+		}
+		fmt.Printf("Save Queue Length: %d, Workers: %d\n", saveQueueLen, atomic.LoadInt32(&db.saveWorkers))
+		fmt.Printf("Add Queue Length: %d, Workers: %d\n", addQueueLen, atomic.LoadInt32(&db.addWorkers))
+		fmt.Printf("Delete Queue Length: %d, Workers: %d\n", deleteQueueLen, atomic.LoadInt32(&db.deleteWorkers))
+		fmt.Printf("Read Queue Length: %d, Workers: %d\n", readQueueLen, atomic.LoadInt32(&db.readWorkers))
+	}
+}
+
+// Function to clear the terminal screen
+func clearTerminal() {
+	cmd := exec.Command("clear")
+	cmd.Stdout = os.Stdout
+	cmd.Run()
+}
+
+// Function to move the cursor up by n lines
+func moveCursorUp(n int) {
+	fmt.Printf("\033[%dA", n)
 }
 
 func StartServer(cfg types.Config) {
@@ -380,9 +506,9 @@ func StartServer(cfg types.Config) {
 	apiKey := config.Api_key
 	var name string
 	if config.UseBSON {
-		name = "data.bson"
+		name = config.File_name + ".bson"
 	} else {
-		name = "data.json"
+		name = config.File_name + ".json"
 	}
 	db, err := NewDatabase(name, config.UseBSON)
 	if err != nil {
