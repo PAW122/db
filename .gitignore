@@ -4,3 +4,4 @@ db/data.bson
 db/data.bson
 db/data.json
 database_config.json
+/db
