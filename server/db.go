@@ -10,9 +10,12 @@ import (
 	"pawiu-db/types"
 	"runtime"
 	"sync"
+
+	"github.com/jroimartin/gocui"
 )
 
-// TODO: dodac spowrotem obsługę bson
+var messageBuffer []string
+
 type Database struct {
 	data                map[string]*cacheData
 	file                string
@@ -21,7 +24,6 @@ type Database struct {
 	deleteQueue         chan deleteTask
 	readQueue           chan readTask
 	addQueue            chan addTask
-	batchReadQueue      chan batchReadTask
 	mu                  sync.RWMutex
 	saveMu              sync.Mutex
 	deleteMu            sync.Mutex
@@ -52,11 +54,6 @@ type Database struct {
 	avgReadTime           float64
 	avgDeleteTime         float64
 	avgAddTime            float64
-}
-
-type batchReadTask struct {
-	keys     []string
-	response chan map[string]interface{}
 }
 
 type addTask struct {
@@ -171,9 +168,12 @@ func GetQueueLengthRead(db *Database) int {
 	return len(db.readQueue)
 }
 
-func StartServer(cfg types.Config) {
+var gui *gocui.Gui
+
+func StartServer(cfg types.Config, _gui *gocui.Gui) {
 	config = cfg
 	apiKey := config.Api_key
+	gui = _gui
 	var name string
 	if config.UseBSON {
 		name = config.File_name + ".bson"
@@ -185,11 +185,12 @@ func StartServer(cfg types.Config) {
 		panic(err)
 	}
 
-	fmt.Printf("File format: %s\n", name)
-	fmt.Printf("Starting server on port %d\n", config.Port)
+	displayMessage(fmt.Sprintf("File format: %s", name))
+	displayMessage(fmt.Sprintf("Starting server on port %d", config.Port))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Server running on port %d", config.Port)
+		// TODO: ping res
 	})
 
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +211,7 @@ func StartServer(cfg types.Config) {
 		err = db.Set(path, data)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to save data: %v", err), http.StatusInternalServerError)
+			// TODO err count
 			return
 		}
 

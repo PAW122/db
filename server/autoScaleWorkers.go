@@ -61,13 +61,26 @@ func (db *Database) autoScaleWorkers() {
 
 func layout(g *gocui.Gui) error {
 	maxX, maxY := g.Size()
-	if v, err := g.SetView("queues", 0, 0, maxX-1, maxY-1); err != nil {
+
+	// Layout for queues
+	if v, err := g.SetView("queues", 0, 0, maxX/2-1, maxY-1); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
 		v.Title = "Queue Lengths and Workers"
 		v.Wrap = true
 	}
+
+	// Layout for messages
+	if v, err := g.SetView("messages", maxX/2, 0, maxX-1, maxY-1); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Title = "Messages"
+		v.Wrap = true
+		v.Autoscroll = true
+	}
+
 	return nil
 }
 
@@ -82,6 +95,7 @@ func keybindings(g *gocui.Gui, db *Database) error {
 func updateView(g *gocui.Gui, db *Database) {
 	for {
 		g.Update(func(g *gocui.Gui) error {
+			// Update the queues view
 			v, err := g.View("queues")
 			if err != nil {
 				return err
@@ -104,7 +118,6 @@ func updateView(g *gocui.Gui, db *Database) {
 			fmt.Fprintf(v, "Finished Read Time: %d\n", db.totalReadOperations)
 			fmt.Fprintf(v, "Finished Delete Time: %d\n", db.totalDeleteOperations)
 			fmt.Fprintf(v, "Finished Add Time: %d\n", db.totalAddOperations)
-			// fmt.Fprintf(v, "Config: %+v\n", config)
 
 			fmt.Fprintf(v, "\nStatistics - 2:\n")
 			fmt.Fprintf(v, "Average Save Time: %.2f ms\n", db.avgSaveTime)
@@ -126,10 +139,64 @@ func updateView(g *gocui.Gui, db *Database) {
 
 			return nil
 		})
+		g.Update(func(g *gocui.Gui) error {
+			// Update the queues view
+			v, err := g.View("messages")
+			if err != nil {
+				return err
+			}
+			v.Clear()
+
+			for _, msg := range messageBuffer {
+				fmt.Fprintf(v, "%s\n", msg)
+			}
+
+			return nil
+		})
 		time.Sleep(1 * time.Second)
 	}
 }
 
 func quit(g *gocui.Gui, v *gocui.View) error {
 	return gocui.ErrQuit
+}
+
+func displayMessage(message string) {
+	messageBuffer = append(messageBuffer, message)
+}
+func DisplayMessage(message string) {
+	messageBuffer = append(messageBuffer, message)
+}
+
+func Layout(g *gocui.Gui) error {
+	maxX, maxY := g.Size()
+
+	// Create or update the "queues" view
+	if v, err := g.SetView("queues", 0, 0, maxX/2-1, maxY-1); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Title = "Queue Lengths and Workers"
+		v.Wrap = true
+	}
+
+	// Create or update the "messages" view
+	if v, err := g.SetView("messages", maxX/2, 0, maxX-1, maxY-1); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Title = "Messages"
+		v.Wrap = true
+		v.Autoscroll = true
+	}
+
+	return nil
+}
+
+func Keybindings(g *gocui.Gui, db *Database) error {
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+		return err
+	}
+	go updateView(g, db)
+	return nil
 }

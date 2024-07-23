@@ -53,7 +53,7 @@ func (db *Database) processSingleReadTask(task readTask) {
 		}
 		// Cache the data
 		db.cacheMu.Lock()
-		db.cache[task.key] = data
+		cacheOutgoing(task.key, data)
 		db.cacheMu.Unlock()
 		task.response <- readResponse{value: data, found: true}
 
@@ -66,7 +66,7 @@ func (db *Database) processSingleReadTask(task readTask) {
 	} else {
 		// Cache the in-memory data
 		db.cacheMu.Lock()
-		db.cache[task.key] = cd
+		cacheOutgoing(task.key, cd)
 		db.cacheMu.Unlock()
 		task.response <- readResponse{value: cd, found: true}
 	}
