@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 func (db *Database) Get(key string) (interface{}, bool) {
-	response := make(chan readResponse)
+	response := make(chan readResponse, 1) // Buffered channel to avoid blocking
 	db.enqueueReadTask(key, response)
 	result := <-response
 	return result.value, result.found
@@ -21,11 +23,12 @@ func (db *Database) enqueueReadTask(key string, response chan readResponse) {
 
 func (db *Database) processReadQueue() {
 	for task := range db.readQueue {
-		db.processSingleReadTask(task)
+		go db.processSingleReadTask(task) // Use goroutines for parallel processing
 	}
 }
 
 func (db *Database) processSingleReadTask(task readTask) {
+	// Check cache first
 	db.cacheMu.RLock()
 	cachedData, cacheFound := db.cache[task.key]
 	db.cacheMu.RUnlock()
@@ -34,28 +37,45 @@ func (db *Database) processSingleReadTask(task readTask) {
 		return
 	}
 
-	db.mu.Lock()
+	start := time.Now()
+
+	// Check in-memory data
+	db.mu.RLock()
 	cd, ok := db.data[task.key]
-	db.mu.Unlock()
+	db.mu.RUnlock()
 
 	if !ok {
+		// Read from file
 		data, found := db.readFromFile(task.key)
 		if !found {
 			task.response <- readResponse{value: nil, found: false}
 			return
 		}
-		go cacheOutgoing(task.key, data)
+		// Cache the data
+		db.cacheMu.Lock()
+		db.cache[task.key] = data
+		db.cacheMu.Unlock()
 		task.response <- readResponse{value: data, found: true}
+
+		//stats
+		duration := time.Since(start).Milliseconds()
+		atomic.AddInt32(&db.totalReadOperations, 1)
+		if db.totalReadOperations > 0 {
+			db.avgReadTime = ((db.avgReadTime * float64(db.totalReadOperations-1)) + float64(duration)) / float64(db.totalReadOperations)
+		}
 	} else {
-		go cacheOutgoing(task.key, cd)
+		// Cache the in-memory data
+		db.cacheMu.Lock()
+		db.cache[task.key] = cd
+		db.cacheMu.Unlock()
 		task.response <- readResponse{value: cd, found: true}
 	}
 }
 
 func (db *Database) readFromFile(key string) (interface{}, bool) {
-	db.mu.Lock()
+	db.mu.RLock()
 	fileName, exists := db.keyToFileMap[key]
-	db.mu.Unlock()
+	db.mu.RUnlock()
 
 	if !exists {
 		return nil, false

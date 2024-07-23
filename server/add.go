@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,16 +14,27 @@ func (db *Database) processAddQueue() {
 		select {
 		case task := <-db.addQueue:
 			db.addBufferMutex.Lock()
+			start := time.Now()
 			db.addBuffer = append(db.addBuffer, task)
 			if len(db.addBuffer) >= db.addBufferSize {
 				db.addBufferCond.Signal()
 			}
 			db.addBufferMutex.Unlock()
+			//stats
+			duration := time.Since(start).Milliseconds()
+			db.avgAddTime = ((db.avgAddTime * float64(db.totalAddOperations)) + float64(duration)) / float64(db.totalAddOperations+1)
+			atomic.AddInt32(&db.totalAddOperations, 1)
 
 		case <-ticker.C:
 			db.addBufferMutex.Lock()
+			start := time.Now()
 			if len(db.addBuffer) > 0 {
 				db.processAddBuffer()
+
+				//stats
+				duration := time.Since(start).Milliseconds()
+				db.avgAddTime = ((db.avgAddTime * float64(db.totalAddOperations)) + float64(duration)) / float64(db.totalAddOperations+1)
+				atomic.AddInt32(&db.totalAddOperations, 1)
 			}
 			db.addBufferMutex.Unlock()
 		}

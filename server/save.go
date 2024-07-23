@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/mgo.v2/bson"
@@ -49,26 +50,21 @@ func (db *Database) batchSave(tasks map[string]interface{}) error {
 		db.currentFileKeyCount[file]++
 	}
 
-	// Prepare tasks for concurrent saving
 	var wg sync.WaitGroup
-	fileChannel := make(chan string, 2)
+	fileChannel := make(chan struct{}, 10) // Zwiększona liczba równoczesnych operacji plikowych
 
-	// Function to save tasks for a specific file
 	saveFile := func(file string, tasks map[string]interface{}) {
 		defer wg.Done()
+		fileChannel <- struct{}{}
 		if err := db.appendToFile(file, tasks); err != nil {
 			log.Printf("Error appending to file %v: %v", file, err)
 		}
+		<-fileChannel
 	}
 
-	// Start saving tasks for up to 2 files concurrently
 	for file, tasks := range filesToTasks {
 		wg.Add(1)
 		go saveFile(file, tasks)
-		fileChannel <- file
-		if len(fileChannel) >= 2 {
-			<-fileChannel // Limit the number of concurrent file operations to 2
-		}
 	}
 	wg.Wait()
 
@@ -78,7 +74,6 @@ func (db *Database) batchSave(tasks map[string]interface{}) error {
 func (db *Database) appendToFile(file string, newTasks map[string]interface{}) error {
 	filePath := filepath.Join("db", file)
 
-	// Read existing data from file
 	var existingData map[string]interface{}
 	if _, err := os.Stat(filePath); err == nil {
 		existingData, err = readFile(filePath)
@@ -89,12 +84,10 @@ func (db *Database) appendToFile(file string, newTasks map[string]interface{}) e
 		existingData = make(map[string]interface{})
 	}
 
-	// Merge new tasks with existing data
 	for key, value := range newTasks {
 		existingData[key] = value
 	}
 
-	// Marshal updated data
 	var data []byte
 	var err error
 	if db.useBSON {
@@ -106,7 +99,6 @@ func (db *Database) appendToFile(file string, newTasks map[string]interface{}) e
 		return fmt.Errorf("error marshalling data: %v", err)
 	}
 
-	// Write updated data back to file
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		return fmt.Errorf("error writing to file: %v", err)
 	}
@@ -114,6 +106,56 @@ func (db *Database) appendToFile(file string, newTasks map[string]interface{}) e
 	return nil
 }
 
+func (db *Database) generateNewFileName() string {
+	newFileIndex := len(db.currentFileKeyCount) + 1
+	if db.useBSON {
+		return "db_file_" + strconv.Itoa(newFileIndex) + ".bson"
+	} else {
+		return "db_file_" + strconv.Itoa(newFileIndex) + ".json"
+	}
+}
+
+func (db *Database) processSaveQueue() {
+	tasks := make(map[string]interface{})
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case task := <-db.saveQueue:
+			db.tasksMu.Lock()
+			start := time.Now()
+			tasks[task.key] = task.value
+			if len(tasks) >= 100 { // TODO z connfigu pobierać wartość albo ją dynamicznie dostosowywać
+				if err := db.batchSave(tasks); err != nil {
+					log.Printf("Error saving batch: %v", err)
+				}
+				tasks = make(map[string]interface{})
+			}
+			db.tasksMu.Unlock()
+
+			//stats
+			duration := time.Since(start).Milliseconds()
+			db.avgSaveTime = ((db.avgSaveTime * float64(db.totalSaveOperations)) + float64(duration)) / float64(db.totalSaveOperations+1)
+			atomic.AddInt32(&db.totalSaveOperations, 1)
+		case <-ticker.C:
+			db.tasksMu.Lock()
+			start := time.Now()
+			if len(tasks) > 0 {
+				if err := db.batchSave(tasks); err != nil {
+					log.Printf("Error saving batch: %v", err)
+				}
+				tasks = make(map[string]interface{})
+
+				//stats
+				duration := time.Since(start).Milliseconds()
+				db.avgSaveTime = ((db.avgSaveTime * float64(db.totalSaveOperations)) + float64(duration)) / float64(db.totalSaveOperations+1)
+				atomic.AddInt32(&db.totalSaveOperations, 1)
+			}
+			db.tasksMu.Unlock()
+		}
+	}
+}
 func readFile(filePath string) (map[string]interface{}, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -126,15 +168,6 @@ func readFile(filePath string) (map[string]interface{}, error) {
 	}
 
 	return result, nil
-}
-
-func (db *Database) generateNewFileName() string {
-	newFileIndex := len(db.currentFileKeyCount) + 1
-	if db.useBSON {
-		return "db_file_" + strconv.Itoa(newFileIndex) + ".bson"
-	} else {
-		return "db_file_" + strconv.Itoa(newFileIndex) + ".json"
-	}
 }
 
 func (db *Database) save() error {
@@ -163,34 +196,4 @@ func (db *Database) save() error {
 	}
 
 	return nil
-}
-
-func (db *Database) processSaveQueue() {
-	tasks := make(map[string]interface{})
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case task := <-db.saveQueue:
-			db.tasksMu.Lock()
-			tasks[task.key] = task.value
-			if len(tasks) >= 100 {
-				if err := db.batchSave(tasks); err != nil {
-					log.Printf("Error saving batch: %v", err)
-				}
-				tasks = make(map[string]interface{})
-			}
-			db.tasksMu.Unlock()
-		case <-ticker.C:
-			db.tasksMu.Lock()
-			if len(tasks) > 0 {
-				if err := db.batchSave(tasks); err != nil {
-					log.Printf("Error saving batch: %v", err)
-				}
-				tasks = make(map[string]interface{})
-			}
-			db.tasksMu.Unlock()
-		}
-	}
 }

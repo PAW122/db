@@ -21,7 +21,8 @@ type Database struct {
 	deleteQueue         chan deleteTask
 	readQueue           chan readTask
 	addQueue            chan addTask
-	mu                  sync.Mutex
+	batchReadQueue      chan batchReadTask
+	mu                  sync.RWMutex
 	saveMu              sync.Mutex
 	deleteMu            sync.Mutex
 	tasksMu             sync.Mutex
@@ -41,6 +42,21 @@ type Database struct {
 	currentFileKeyCount map[string]int
 	cache               map[string]interface{}
 	cacheMu             sync.RWMutex
+
+	//gui stats
+	totalSaveOperations   int32
+	totalReadOperations   int32
+	totalDeleteOperations int32
+	totalAddOperations    int32
+	avgSaveTime           float64
+	avgReadTime           float64
+	avgDeleteTime         float64
+	avgAddTime            float64
+}
+
+type batchReadTask struct {
+	keys     []string
+	response chan map[string]interface{}
 }
 
 type addTask struct {
