@@ -130,6 +130,7 @@ func (db *Database) processSaveQueue() {
 				if err := db.batchSave(tasks); err != nil {
 					log.Printf("Error saving batch: %v", err)
 				}
+				go cacheIncoming(task.key, task.value)
 				tasks = make(map[string]interface{})
 			}
 			db.tasksMu.Unlock()

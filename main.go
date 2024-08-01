@@ -33,6 +33,7 @@ func main() {
 		// Przykładowa konfiguracja
 		config := types.Config{
 			Port:                5432,
+			Tcp_Port:            5431,
 			Api_key:             "database_acces_api_key",
 			Version:             "1.2.4",
 			File_name:           "db",

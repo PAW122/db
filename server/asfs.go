@@ -17,6 +17,20 @@ import (
 // + jeżeli w db_fs jest key o takiej wartości jak key z value
 // to odczytaj wartość z odpowiedniego pliku
 
+/*
+	dodać w npm lib funkcję "save data-blob" (to save hudge files link audio ect)
+	+ action: 'blob'
+
+	taki wpis dodaje tag %BLOB%<file_id>%END%
+	i całe dane są w oddzielnym pliku
+
+	albo
+
+	stworzyć plik blobs.bin
+	i w db będzie odnośnik do pointera / offsetu od kąd do kąd są dane danego pliku aby go odczytac
+	nie twarząc miliona pików jeżeli ktoś niumiejętnie używa liba
+*/
+
 func AutoScalingFileSystem(config types.Config) {
 	if !get_cpu_usage(config) {
 		return

@@ -2,6 +2,7 @@ package types
 
 type Config struct {
 	Port                int         `json:"port"`
+	Tcp_Port            int         `json:"tcp_port"`
 	Api_key             string      `json:"api_key"`
 	Version             string      `json:"version"`
 	UseBSON             bool        `json:"useBSON"`

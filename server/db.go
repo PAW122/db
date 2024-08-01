@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,8 +45,9 @@ type Database struct {
 	currentFile         string
 	maxKeysPerFile      int
 	currentFileKeyCount map[string]int
-	cache               map[string]interface{}
-	cacheMu             sync.RWMutex
+	maxGoroutines       int
+	batchSize           int
+	readRequests        int32
 
 	//gui stats
 	totalSaveOperations   int32
@@ -99,6 +103,8 @@ func NewDatabase(filename string, useBSON bool) (*Database, error) {
 		maxKeysPerFile:      10000,
 		keyToFileMap:        make(map[string]string),
 		currentFileKeyCount: make(map[string]int),
+		maxGoroutines:       100,  // Increase the number of goroutines
+		batchSize:           1000, // Size of each batch for batch processing
 	}
 	db.addBufferCond = sync.NewCond(&db.addBufferMutex)
 	err := db.load()
@@ -300,6 +306,8 @@ func StartServer(cfg types.Config, _gui *gocui.Gui) {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	go StartTCPServer(config, db)
+
 	http.ListenAndServe(fmt.Sprintf(":%d", config.Port), nil)
 }
 
@@ -317,4 +325,174 @@ func sendJSONResponse(w http.ResponseWriter, data interface{}) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonData)
+}
+
+// TCP =====================================
+func StartTCPServer(cfg types.Config, db *Database) {
+	address := fmt.Sprintf(":%d", cfg.Tcp_Port)
+	displayMessage(fmt.Sprintf("TCP server started on %s", address))
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		displayMessage(fmt.Sprintf("Failed to start TCP server: %v", err))
+		return
+	}
+	defer listener.Close()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			displayMessage(fmt.Sprintf("Failed to accept connection: %v", err))
+			continue
+		}
+		go handleTCPConnection(conn, db)
+	}
+}
+
+func handleTCPConnection(conn net.Conn, db *Database) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	decoder := json.NewDecoder(reader)
+
+	for {
+		var request map[string]interface{}
+		err := decoder.Decode(&request)
+		if err == io.EOF {
+			log.Println("Connection closed by client")
+			break
+		}
+		if err != nil {
+			if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
+				log.Println("Connection timed out")
+				break
+			}
+			if err == io.ErrUnexpectedEOF {
+				log.Println("Connection closed abruptly")
+				break
+			}
+			displayMessage(fmt.Sprintf("Invalid JSON format: %v", err))
+			break
+		}
+
+		response := processRequest(request, db)
+		responseBytes, err := json.Marshal(response)
+		if err != nil {
+			displayMessage(fmt.Sprintf("Failed to marshal response: %v", err))
+			continue
+		}
+
+		_, err = conn.Write(append(responseBytes, '\n'))
+		if err != nil {
+			displayMessage(fmt.Sprintf("Failed to write response: %v", err))
+			break
+		}
+	}
+}
+
+func processRequest(request map[string]interface{}, db *Database) map[string]interface{} {
+	action, ok := request["action"].(string)
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid action",
+		}
+	}
+
+	switch action {
+	case "save":
+		return handleSaveRequest(request, db)
+	case "read":
+		return handleReadRequest(request, db)
+	case "delete":
+		return handleDeleteRequest(request, db)
+	case "add":
+		return handleAddRequest(request, db)
+	default:
+		return map[string]interface{}{
+			"error": "unknown action",
+		}
+	}
+}
+
+func handleSaveRequest(request map[string]interface{}, db *Database) map[string]interface{} {
+	path, ok := request["path"].(string)
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid path",
+		}
+	}
+	data, ok := request["data"].(interface{})
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid data",
+		}
+	}
+	err := db.Set(path, data)
+	if err != nil {
+		return map[string]interface{}{
+			"error": fmt.Sprintf("failed to save data: %v", err),
+		}
+	}
+	return map[string]interface{}{
+		"status": "ok",
+	}
+}
+
+func handleReadRequest(request map[string]interface{}, db *Database) map[string]interface{} {
+	path, ok := request["path"].(string)
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid path",
+		}
+	}
+	data, found := db.Get(path)
+	if !found {
+		return map[string]interface{}{
+			"error": "data not found",
+		}
+	}
+	return map[string]interface{}{
+		"status": "ok",
+		"data":   data,
+	}
+}
+
+func handleDeleteRequest(request map[string]interface{}, db *Database) map[string]interface{} {
+	path, ok := request["path"].(string)
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid path",
+		}
+	}
+	err := db.Delete(path)
+	if err != nil {
+		return map[string]interface{}{
+			"error": fmt.Sprintf("failed to delete data: %v", err),
+		}
+	}
+	return map[string]interface{}{
+		"status": "ok",
+	}
+}
+
+func handleAddRequest(request map[string]interface{}, db *Database) map[string]interface{} {
+	path, ok := request["path"].(string)
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid path",
+		}
+	}
+	data, ok := request["data"].(interface{})
+	if !ok {
+		return map[string]interface{}{
+			"error": "missing or invalid data",
+		}
+	}
+	err := db.Add(path, data)
+	if err != nil {
+		return map[string]interface{}{
+			"error": fmt.Sprintf("failed to add data: %v", err),
+		}
+	}
+	return map[string]interface{}{
+		"status": "ok",
+	}
 }

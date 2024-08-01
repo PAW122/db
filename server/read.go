@@ -11,89 +11,82 @@ import (
 )
 
 func (db *Database) Get(key string) (interface{}, bool) {
-	response := make(chan readResponse, 1) // Buffered channel to avoid blocking
+	response := make(chan readResponse, 1)
 	db.enqueueReadTask(key, response)
 	result := <-response
 	return result.value, result.found
 }
 
 func (db *Database) enqueueReadTask(key string, response chan readResponse) {
+	atomic.AddInt32(&db.readRequests, 1)
 	db.readQueue <- readTask{key: key, response: response}
 }
 
 func (db *Database) processReadQueue() {
-	for task := range db.readQueue {
-		go db.processSingleReadTask(task) // Use goroutines for parallel processing
+	var tasks []readTask
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case task := <-db.readQueue:
+			tasks = append(tasks, task)
+			db.adjustTicker(&ticker)
+
+			if len(tasks) >= 100 {
+				db.processBatch(tasks)
+				tasks = nil
+			}
+		case <-ticker.C:
+			if len(tasks) > 0 {
+				db.processBatch(tasks)
+				tasks = nil
+			}
+			db.adjustTicker(&ticker)
+		}
 	}
 }
 
-func (db *Database) processSingleReadTask(task readTask) {
-	// Check cache first
-	db.cacheMu.RLock()
-	cachedData, cacheFound := db.cache[task.key]
-	db.cacheMu.RUnlock()
-	if cacheFound {
-		task.response <- readResponse{value: cachedData, found: true}
-		return
+func (db *Database) adjustTicker(ticker **time.Ticker) {
+	readRequests := atomic.LoadInt32(&db.readRequests)
+	var interval time.Duration
+
+	switch {
+	case readRequests < 10:
+		interval = 500 * time.Millisecond
+	case readRequests < 100:
+		interval = 250 * time.Millisecond
+	case readRequests < 500:
+		interval = 100 * time.Millisecond
+	default:
+		interval = 10 * time.Millisecond
 	}
+
+	*ticker = time.NewTicker(interval)
+	atomic.StoreInt32(&db.readRequests, 0)
+}
+
+func (db *Database) processBatch(tasks []readTask) {
+	db.tasksMu.Lock()
+	defer db.tasksMu.Unlock()
 
 	start := time.Now()
-
-	// Check in-memory data
-	db.mu.RLock()
-	cd, ok := db.data[task.key]
-	db.mu.RUnlock()
-
-	if !ok {
-		// Read from file
-		data, found := db.readFromFile(task.key)
-		if !found {
-			task.response <- readResponse{value: nil, found: false}
-			return
-		}
-		// Cache the data
-		db.cacheMu.Lock()
-		cacheOutgoing(task.key, data)
-		db.cacheMu.Unlock()
-		task.response <- readResponse{value: data, found: true}
-
-		//stats
-		duration := time.Since(start).Milliseconds()
-		atomic.AddInt32(&db.totalReadOperations, 1)
-		if db.totalReadOperations > 0 {
-			db.avgReadTime = ((db.avgReadTime * float64(db.totalReadOperations-1)) + float64(duration)) / float64(db.totalReadOperations)
-		}
-	} else {
-		// Cache the in-memory data
-		db.cacheMu.Lock()
-		cacheOutgoing(task.key, cd)
-		db.cacheMu.Unlock()
-		task.response <- readResponse{value: cd, found: true}
-	}
-}
-
-func (db *Database) readFromFile(key string) (interface{}, bool) {
-	db.mu.RLock()
-	fileName, exists := db.keyToFileMap[key]
-	db.mu.RUnlock()
-
-	if !exists {
-		return nil, false
+	keys := make([]string, len(tasks))
+	for i, task := range tasks {
+		keys[i] = task.key
 	}
 
-	filePath := filepath.Join("db", fileName)
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, false
+	results := db.batchRead(keys)
+
+	for _, task := range tasks {
+		value, found := results[task.key]
+		task.response <- readResponse{value: value, found: found}
+		close(task.response)
 	}
 
-	var fileData map[string]interface{}
-	if err := json.Unmarshal(data, &fileData); err != nil {
-		return nil, false
-	}
-
-	value, found := fileData[key]
-	return value, found
+	duration := time.Since(start).Milliseconds()
+	db.avgReadTime = ((db.avgReadTime * float64(db.totalReadOperations)) + float64(duration)) / float64(db.totalReadOperations+1)
+	atomic.AddInt32(&db.totalReadOperations, int32(len(tasks)))
 }
 
 func (db *Database) batchRead(keys []string) map[string]interface{} {
@@ -141,4 +134,28 @@ func (db *Database) batchRead(keys []string) map[string]interface{} {
 
 	wg.Wait()
 	return results
+}
+
+func (db *Database) readFromFile(key string) (interface{}, bool) {
+	db.mu.RLock()
+	fileName, exists := db.keyToFileMap[key]
+	db.mu.RUnlock()
+
+	if !exists {
+		return nil, false
+	}
+
+	filePath := filepath.Join("db", fileName)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, false
+	}
+
+	var fileData map[string]interface{}
+	if err := json.Unmarshal(data, &fileData); err != nil {
+		return nil, false
+	}
+
+	value, found := fileData[key]
+	return value, found
 }
