@@ -37,6 +37,7 @@ func main() {
 			Api_key:             "database_acces_api_key",
 			Version:             "1.2.4",
 			File_name:           "db",
+			Max_keys_per_file:   10000,
 			Cache_incoming_all:  true,
 			Cache_incoming_time: 120,
 			Cache_outgoing_all:  true,
@@ -46,11 +47,13 @@ func main() {
 			Queue_delete_size:   100000,
 			Queue_read_size:     100000,
 			Queue_add_size:      100000,
+			Max_goroutines:      100,
+			Batch_Size:          1000,
 			AsfsConfig: types.ASFS_config{
 				Enable:        true,
 				Max_cpu_usage: 70,
 			},
-			AsqsConfig: types.ASQS_config{ //
+			AsqsConfig: types.ASQS_config{
 				Enable:                  true,
 				Interval:                5,
 				Queue_threshold:         1000,

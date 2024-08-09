@@ -5,11 +5,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+// Get retrieves a value from the database by its key.
 func (db *Database) Get(key string) (interface{}, bool) {
 	response := make(chan readResponse, 1)
 	db.enqueueReadTask(key, response)
@@ -17,11 +19,13 @@ func (db *Database) Get(key string) (interface{}, bool) {
 	return result.value, result.found
 }
 
+// enqueueReadTask adds a read task to the queue.
 func (db *Database) enqueueReadTask(key string, response chan readResponse) {
 	atomic.AddInt32(&db.readRequests, 1)
 	db.readQueue <- readTask{key: key, response: response}
 }
 
+// processReadQueue processes tasks in the read queue.
 func (db *Database) processReadQueue() {
 	var tasks []readTask
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -33,7 +37,7 @@ func (db *Database) processReadQueue() {
 			tasks = append(tasks, task)
 			db.adjustTicker(&ticker)
 
-			if len(tasks) >= 100 {
+			if len(tasks) >= 100 || len(tasks) < 20 {
 				db.processBatch(tasks)
 				tasks = nil
 			}
@@ -47,6 +51,7 @@ func (db *Database) processReadQueue() {
 	}
 }
 
+// adjustTicker adjusts the ticker based on read requests.
 func (db *Database) adjustTicker(ticker **time.Ticker) {
 	readRequests := atomic.LoadInt32(&db.readRequests)
 	var interval time.Duration
@@ -66,6 +71,7 @@ func (db *Database) adjustTicker(ticker **time.Ticker) {
 	atomic.StoreInt32(&db.readRequests, 0)
 }
 
+// processBatch processes a batch of read tasks.
 func (db *Database) processBatch(tasks []readTask) {
 	db.tasksMu.Lock()
 	defer db.tasksMu.Unlock()
@@ -89,12 +95,15 @@ func (db *Database) processBatch(tasks []readTask) {
 	atomic.AddInt32(&db.totalReadOperations, int32(len(tasks)))
 }
 
+// batchRead reads a batch of keys from the database.
 func (db *Database) batchRead(keys []string) map[string]interface{} {
 	results := make(map[string]interface{})
 	fileKeyMap := make(map[string][]string)
 
 	for _, key := range keys {
-		fileName, exists := db.keyToFileMap[key]
+		// Extract the root key (before the first dot) for file mapping.
+		rootKey := strings.Split(key, ".")[0]
+		fileName, exists := db.keyToFileMap[rootKey]
 		if exists {
 			fileKeyMap[fileName] = append(fileKeyMap[fileName], key)
 		}
@@ -120,7 +129,8 @@ func (db *Database) batchRead(keys []string) map[string]interface{} {
 
 		mu.Lock()
 		for _, key := range keys {
-			if value, found := fileData[key]; found {
+			value, found := resolveNestedKey(fileData, key)
+			if found {
 				results[key] = value
 			}
 		}
@@ -136,9 +146,28 @@ func (db *Database) batchRead(keys []string) map[string]interface{} {
 	return results
 }
 
+// resolveNestedKey resolves a key that may refer to a nested structure.
+func resolveNestedKey(data map[string]interface{}, key string) (interface{}, bool) {
+	parts := strings.Split(key, ".")
+	var current interface{} = data
+
+	for _, part := range parts {
+		if asMap, ok := current.(map[string]interface{}); ok {
+			current = asMap[part]
+		} else {
+			return nil, false
+		}
+	}
+
+	return current, true
+}
+
+// readFromFile reads a specific key from a file.
 func (db *Database) readFromFile(key string) (interface{}, bool) {
 	db.mu.RLock()
-	fileName, exists := db.keyToFileMap[key]
+	// Extract the root key (before the first dot) for file mapping.
+	rootKey := strings.Split(key, ".")[0]
+	fileName, exists := db.keyToFileMap[rootKey]
 	db.mu.RUnlock()
 
 	if !exists {
@@ -156,6 +185,5 @@ func (db *Database) readFromFile(key string) (interface{}, bool) {
 		return nil, false
 	}
 
-	value, found := fileData[key]
-	return value, found
+	return resolveNestedKey(fileData, key)
 }

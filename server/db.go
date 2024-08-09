@@ -93,18 +93,18 @@ func NewDatabase(filename string, useBSON bool) (*Database, error) {
 		data:                make(map[string]*cacheData),
 		file:                filepath.Join("db", filename),
 		useBSON:             useBSON,
-		saveQueue:           make(chan saveTask, 100),
-		deleteQueue:         make(chan deleteTask, 100),
-		readQueue:           make(chan readTask, 100),
-		addQueue:            make(chan addTask, 100),
+		saveQueue:           make(chan saveTask, config.Queue_save_size),
+		deleteQueue:         make(chan deleteTask, config.Queue_delete_size),
+		readQueue:           make(chan readTask, config.Queue_read_size),
+		addQueue:            make(chan addTask, config.Queue_add_size),
 		addBufferSize:       1000,
 		addBatchSize:        100,
 		addBuffer:           make([]addTask, 0, 1000),
-		maxKeysPerFile:      10000,
+		maxKeysPerFile:      config.Max_keys_per_file,
 		keyToFileMap:        make(map[string]string),
 		currentFileKeyCount: make(map[string]int),
-		maxGoroutines:       100,  // Increase the number of goroutines
-		batchSize:           1000, // Size of each batch for batch processing
+		maxGoroutines:       config.Max_goroutines,
+		batchSize:           config.Batch_Size,
 	}
 	db.addBufferCond = sync.NewCond(&db.addBufferMutex)
 	err := db.load()
@@ -304,6 +304,15 @@ func StartServer(cfg types.Config, _gui *gocui.Gui) {
 		}
 
 		w.WriteHeader(http.StatusOK)
+	})
+
+	http.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		if !authAPIKey(r, apiKey) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		w.Write([]byte(config.Version))
 	})
 
 	go StartTCPServer(config, db)

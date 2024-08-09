@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -84,8 +85,9 @@ func (db *Database) appendToFile(file string, newTasks map[string]interface{}) e
 		existingData = make(map[string]interface{})
 	}
 
+	// Update existing data with new tasks
 	for key, value := range newTasks {
-		existingData[key] = value
+		updateNestedMap(existingData, key, value)
 	}
 
 	var data []byte
@@ -197,4 +199,20 @@ func (db *Database) save() error {
 	}
 
 	return nil
+}
+
+func updateNestedMap(data map[string]interface{}, key string, value interface{}) {
+	parts := strings.Split(key, ".")
+	lastIndex := len(parts) - 1
+
+	for i, part := range parts {
+		if i == lastIndex {
+			data[part] = value
+		} else {
+			if _, exists := data[part]; !exists {
+				data[part] = make(map[string]interface{})
+			}
+			data = data[part].(map[string]interface{})
+		}
+	}
 }
