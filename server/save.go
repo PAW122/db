@@ -16,8 +16,16 @@ import (
 )
 
 func (db *Database) Set(key string, value interface{}) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	if key == "" {
 		return fmt.Errorf("key cannot be empty")
+	}
+
+	// Jeśli zapisujemy zagnieżdżony klucz, upewnij się, że jego "główna" część jest również zmapowana
+	baseKey := strings.Split(key, ".")[0]
+	if _, exists := db.keyToFileMap[baseKey]; !exists {
+		db.keyToFileMap[baseKey] = db.currentFile
 	}
 
 	db.enqueueSaveTask(key, value)
@@ -34,14 +42,17 @@ func (db *Database) batchSave(tasks map[string]interface{}) error {
 
 	filesToTasks := make(map[string]map[string]interface{})
 	for key, value := range tasks {
-		file, exists := db.keyToFileMap[key]
+		// Zarządzaj mapowaniem plików dla zagnieżdżonych kluczy
+		baseKey := strings.Split(key, ".")[0]
+
+		file, exists := db.keyToFileMap[baseKey]
 		if !exists {
 			if db.currentFile == "" || db.currentFileKeyCount[db.currentFile] >= db.maxKeysPerFile {
 				db.currentFile = db.generateNewFileName()
 				db.currentFileKeyCount[db.currentFile] = 0
 			}
 			file = db.currentFile
-			db.keyToFileMap[key] = file
+			db.keyToFileMap[baseKey] = file
 		}
 
 		if _, ok := filesToTasks[file]; !ok {
@@ -132,7 +143,6 @@ func (db *Database) processSaveQueue() {
 				if err := db.batchSave(tasks); err != nil {
 					log.Printf("Error saving batch: %v", err)
 				}
-				go cacheIncoming(task.key, task.value)
 				tasks = make(map[string]interface{})
 			}
 			db.tasksMu.Unlock()

@@ -213,11 +213,13 @@ func StartServer(cfg types.Config, _gui *gocui.Gui) {
 		}
 
 		path := r.URL.Query().Get("path")
-		go cacheIncoming(path, data)
+
+		saveCache(path, data)
+
 		err = db.Set(path, data)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to save data: %v", err), http.StatusInternalServerError)
-			// TODO err count
+
 			return
 		}
 
@@ -251,6 +253,8 @@ func StartServer(cfg types.Config, _gui *gocui.Gui) {
 			http.Error(w, "Data not found", http.StatusNotFound)
 			return
 		}
+
+		saveCache(path, data)
 
 		sendJSONResponse(w, data)
 	})
@@ -440,6 +444,7 @@ func handleSaveRequest(request map[string]interface{}, db *Database) map[string]
 			"error": fmt.Sprintf("failed to save data: %v", err),
 		}
 	}
+	cacheIncoming(path, data)
 	return map[string]interface{}{
 		"status": "ok",
 	}
@@ -452,12 +457,24 @@ func handleReadRequest(request map[string]interface{}, db *Database) map[string]
 			"error": "missing or invalid path",
 		}
 	}
+
+	data, is_found := getCache(path)
+	if is_found {
+		return map[string]interface{}{
+			"status": "ok",
+			"data":   data,
+		}
+	}
+
 	data, found := db.Get(path)
 	if !found {
 		return map[string]interface{}{
 			"error": "data not found",
 		}
 	}
+
+	cacheOutgoing(path, data)
+
 	return map[string]interface{}{
 		"status": "ok",
 		"data":   data,

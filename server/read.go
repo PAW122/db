@@ -13,6 +13,9 @@ import (
 
 // Get retrieves a value from the database by its key.
 func (db *Database) Get(key string) (interface{}, bool) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	response := make(chan readResponse, 1)
 	db.enqueueReadTask(key, response)
 	result := <-response
@@ -95,15 +98,14 @@ func (db *Database) processBatch(tasks []readTask) {
 	atomic.AddInt32(&db.totalReadOperations, int32(len(tasks)))
 }
 
-// batchRead reads a batch of keys from the database.
 func (db *Database) batchRead(keys []string) map[string]interface{} {
 	results := make(map[string]interface{})
 	fileKeyMap := make(map[string][]string)
 
 	for _, key := range keys {
-		// Extract the root key (before the first dot) for file mapping.
-		rootKey := strings.Split(key, ".")[0]
-		fileName, exists := db.keyToFileMap[rootKey]
+		// Pobierz klucz główny dla zagnieżdżonych kluczy
+		baseKey := strings.Split(key, ".")[0]
+		fileName, exists := db.keyToFileMap[baseKey]
 		if exists {
 			fileKeyMap[fileName] = append(fileKeyMap[fileName], key)
 		}
@@ -128,13 +130,13 @@ func (db *Database) batchRead(keys []string) map[string]interface{} {
 		}
 
 		mu.Lock()
+		defer mu.Unlock()
 		for _, key := range keys {
-			value, found := resolveNestedKey(fileData, key)
-			if found {
+			// Użyj funkcji do pobrania zagnieżdżonej wartości
+			if value, found := getNestedValue(fileData, key); found {
 				results[key] = value
 			}
 		}
-		mu.Unlock()
 	}
 
 	for fileName, keys := range fileKeyMap {
@@ -144,6 +146,26 @@ func (db *Database) batchRead(keys []string) map[string]interface{} {
 
 	wg.Wait()
 	return results
+}
+
+// getNestedValue extracts the value from a nested map based on the key path.
+func getNestedValue(data map[string]interface{}, key string) (interface{}, bool) {
+	parts := strings.Split(key, ".")
+	var current interface{} = data
+
+	for _, part := range parts {
+		if m, ok := current.(map[string]interface{}); ok {
+			if value, found := m[part]; found {
+				current = value
+			} else {
+				return nil, false
+			}
+		} else {
+			return nil, false
+		}
+	}
+
+	return current, true
 }
 
 // resolveNestedKey resolves a key that may refer to a nested structure.
